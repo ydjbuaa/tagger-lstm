@@ -102,13 +102,13 @@ class TaggerLSTMSentiment(object):
         mask = tensor.matrix('mask', dtype=config.floatX)
         y = tensor.vector('y', dtype='int64')
 
-        if model == "tagger-lstm":
-            x_vars = [x, t, mask]
-            y_vars = [x, t, mask, y]
-
-        else:
+        if model == "lstm":
             x_vars = [x, mask]
             y_vars = [x, mask, y]
+        else:
+
+            x_vars = [x, t, mask]
+            y_vars = [x, t, mask, y]
 
         n_timesteps = x.shape[0]
         n_samples = t.shape[1]
@@ -120,15 +120,17 @@ class TaggerLSTMSentiment(object):
         # get word embeddings
         x_emb = Wembs[x.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
 
-        # init LSTM layer for tagger
-        self.lstm_layer = LSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model + "_lstm")
 
-        # add lstm params
-        for param in self.lstm_layer.params:
-            self.params.append(param)
 
         if model == "tagger-lstm":
             # get tagger embeddings
+            # init LSTM layer for tagger
+            self.lstm_layer = LSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model + "_lstm")
+
+            # add lstm params
+            for param in self.lstm_layer.params:
+                self.params.append(param)
+
             Tembs = theano.shared(options["Temb"], "Temb")
             self.params.append(Tembs)
             t_emb = Tembs[t.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
@@ -143,7 +145,24 @@ class TaggerLSTMSentiment(object):
 
             hc_state = self.tag_lstm_layer.layer_output(x_emb, hs_state, mask)
 
+        elif model == 'tagger-slstm':
+            # use SLSTM
+            self.slstm_layer = SLSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model)
+            for param in self.slstm_layer.params:
+                self.params.append(param)
+            Tembs = theano.shared(options["Temb"], "Temb")
+            self.params.append(Tembs)
+            t_emb = Tembs[t.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
+
+            hc_state, hs_state = self.slstm_layer.layer_output(x_emb, t_emb, mask)
+
         else:
+            # init LSTM layer for tagger
+            self.lstm_layer = LSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model + "_lstm")
+
+            # add lstm params
+            for param in self.lstm_layer.params:
+                self.params.append(param)
             # just lstm
             hc_state = self.lstm_layer.layer_output(x_emb, mask)
 
@@ -198,10 +217,11 @@ class TaggerLSTMSentiment(object):
                                                       numpy.array(data[1])[valid_index],
                                                       [data[2][t] for t in valid_index],
                                                       )
-            if self.model == 'tagger-lstm':
-                preds = self.f_pred(x, t, mask)
-            else:
+            if self.model == 'lstm':
                 preds = self.f_pred(x, mask)
+            else:
+                preds = self.f_pred(x, t, mask)
+
             targets = numpy.array(data[1])[valid_index]
             valid_err += (preds == targets).sum()
 
@@ -256,10 +276,10 @@ class TaggerLSTMSentiment(object):
                     n_samples += x.shape[1]
                     n_timesteps = x.shape[0]
                     n_samples = x.shape[1]
-                    if self.model == 'tagger-lstm':
-                        cost = self.f_grad_shared(x, t, mask, y)
-                    else:
+                    if self.model == 'lstm':
                         cost = self.f_grad_shared(x, mask, y)
+                    else:
+                        cost = self.f_grad_shared(x, t, mask, y)
 
                     self.f_update(lrate)
 

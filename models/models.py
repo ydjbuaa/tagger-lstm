@@ -234,7 +234,7 @@ class SLSTM(object):
             sqr += tensor.sum(param ** 2)
         return sqr
 
-    def layer_output(self, xc_blow, xs_blow, xc_mask=None, xs_mask=None):
+    def layer_output(self, xc_blow, xs_blow, mask=None):
         nsteps = xc_blow.shape[0]
         if xc_blow.ndim == 3:
             nsamples = xc_blow.shape[1]
@@ -242,15 +242,15 @@ class SLSTM(object):
             nsamples = 1
 
         # assert
-        assert xc_mask is not None
-        assert xs_mask is not None
+        assert mask is not None
+        assert mask is not None
 
         def _slice(_x, n, dim):
             if _x.ndim == 3:
                 return _x[:, :, n * dim:(n + 1) * dim]
             return _x[:, n * dim:(n + 1) * dim]
 
-        def _step(xc_, xs_, mc_, ms_, hc_, cc_, hs_, cs_):
+        def _step(xc_, xs_, m_, hc_, cc_, hs_, cs_):
 
             xs_pre_act = tensor.dot(hs_, self.us)  #+ tensor.dot(hc_, self.vs)
             xs_pre_act += xs_
@@ -261,10 +261,10 @@ class SLSTM(object):
             cs = tensor.tanh(_slice(xs_pre_act, 3, self.mem_dim))
 
             cs = fs * cs_ + ii * cs
-            cs = ms_[:, None] * cs + (1. - ms_)[:, None] * cs_
+            cs = m_[:, None] * cs + (1. - m_)[:, None] * cs_
 
             hs = os * tensor.tanh(cs)
-            hs = ms_[:, None] * hs + (1. - ms_)[:, None] * hs_
+            hs = m_[:, None] * hs + (1. - m_)[:, None] * hs_
 
 
             xc_pre_act = tensor.dot(hc_, self.uc) + tensor.dot(hs, self.vc)
@@ -278,10 +278,10 @@ class SLSTM(object):
             cc = tensor.tanh(_slice(xc_pre_act, 3, self.mem_dim))
 
             cc = fc * cc_ + ic * cc
-            cc = mc_[:, None] * cc + (1. - mc_)[:, None] * cc_
+            cc = m_[:, None] * cc + (1. - m_)[:, None] * cc_
 
             hc = oc * tensor.tanh(cc)
-            hc = mc_[:, None] * hc + (1. - mc_)[:, None] * hc_
+            hc = m_[:, None] * hc + (1. - m_)[:, None] * hc_
 
             return hc, cc, hs, cs
 
@@ -290,7 +290,7 @@ class SLSTM(object):
 
         results, updates = theano.scan(
             fn=_step,
-            sequences=[xc_blow, xs_blow, xc_mask, xs_mask],
+            sequences=[xc_blow, xs_blow, mask],
             outputs_info=[tensor.alloc(numpy_floatX(0.),
                                        nsamples,
                                        self.mem_dim),

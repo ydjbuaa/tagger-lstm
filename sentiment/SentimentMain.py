@@ -24,7 +24,7 @@ if __name__ == "__main__":
     #senti_lstm = SentimentLSTM(options,model='lstm')
 
     # tagged-lstm
-    senti_lstm = TaggerLSTMSentiment(options, "tagger-sentiment")
+    senti_lstm = TaggerLSTMSentiment(options, "tagger-lstm")
     max_epochs = 10
     batch_size = 25
     lrate = 0.0001
