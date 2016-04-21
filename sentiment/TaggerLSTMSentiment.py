@@ -98,7 +98,7 @@ class TaggerLSTMSentiment(object):
 
         # variables
         x = tensor.matrix('x', dtype='int64')
-        t = tensor.matrix("t", dtype='int64')
+
         mask = tensor.matrix('mask', dtype=config.floatX)
         y = tensor.vector('y', dtype='int64')
 
@@ -106,12 +106,12 @@ class TaggerLSTMSentiment(object):
             x_vars = [x, mask]
             y_vars = [x, mask, y]
         else:
-
+            t = tensor.matrix("t", dtype='int64')
             x_vars = [x, t, mask]
             y_vars = [x, t, mask, y]
 
         n_timesteps = x.shape[0]
-        n_samples = t.shape[1]
+        n_samples = x.shape[1]
 
         # add word embeddings to params list
         Wembs = theano.shared(options['Wemb'], "Wemb")
