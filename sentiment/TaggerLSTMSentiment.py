@@ -1,5 +1,6 @@
 # -*- coding:utf-8 -*-
 from models.models import *
+from models.optimizer import *
 from theano import config
 import theano.tensor as tensor
 import time
@@ -81,66 +82,6 @@ def  prepare_data(seqs, labels, taggers, maxlen=None):
     y = numpy.asarray(labels, dtype="int32")
     return xc, xs, mask, y
 
-def adadelta(lr, params, grads, x, t, mask, y, cost):
-    """
-    An adaptive learning rate optimizer
-
-    Parameters
-    ----------
-    lr : Theano SharedVariable
-        Initial learning rate
-    pramas: Theano SharedVariable
-        Model parameters
-    grads: Theano variable
-        Gradients of cost w.r.t to parameres
-    x: Theano variable
-        Model inputs
-    mask: Theano variable
-        Sequence mask
-    y: Theano variable
-        Targets
-    cost: Theano variable
-        Objective fucntion to minimize
-
-    Notes
-    -----
-    For more information, see [ADADELTA]_.
-
-    .. [ADADELTA] Matthew D. Zeiler, *ADADELTA: An Adaptive Learning
-       Rate Method*, arXiv:1212.5701.
-    """
-
-    zipped_grads = [theano.shared(p.get_value() * numpy_floatX(0.),
-                                  name='%s_grad' % p.name)
-                    for p in params]
-    running_up2 = [theano.shared(p.get_value() * numpy_floatX(0.),
-                                 name='%s_rup2' % p.name)
-                   for p in params]
-    running_grads2 = [theano.shared(p.get_value() * numpy_floatX(0.),
-                                    name='%s_rgrad2' % p.name)
-                      for p in params]
-
-    zgup = [(zg, g) for zg, g in zip(zipped_grads, grads)]
-    rg2up = [(rg2, 0.95 * rg2 + 0.05 * (g ** 2))
-             for rg2, g in zip(running_grads2, grads)]
-
-    f_grad_shared = theano.function([x, t, mask, y], cost, updates=zgup + rg2up,
-                                    name='adadelta_f_grad_shared')
-
-    updir = [-tensor.sqrt(ru2 + 1e-6) / tensor.sqrt(rg2 + 1e-6) * zg
-             for zg, ru2, rg2 in zip(zipped_grads,
-                                     running_up2,
-                                     running_grads2)]
-    ru2up = [(ru2, 0.95 * ru2 + 0.05 * (ud ** 2))
-             for ru2, ud in zip(running_up2, updir)]
-    param_up = [(p, p + ud) for p, ud in zip(params, updir)]
-
-    f_update = theano.function([lr], [], updates=ru2up + param_up,
-                               on_unused_input='ignore',
-                               name='adadelta_f_update')
-
-    return f_grad_shared, f_update
-
 class TaggerLSTMSentiment(object):
     def __init__(self, options, model):
         """
@@ -161,6 +102,14 @@ class TaggerLSTMSentiment(object):
         mask = tensor.matrix('mask', dtype=config.floatX)
         y = tensor.vector('y', dtype='int64')
 
+        if model == "tagger-lstm":
+            x_vars = [x, t, mask]
+            y_vars = [x, t, mask, y]
+
+        else:
+            x_vars = [x, mask]
+            y_vars = [x, mask, y]
+
         n_timesteps = x.shape[0]
         n_samples = t.shape[1]
 
@@ -168,32 +117,36 @@ class TaggerLSTMSentiment(object):
         Wembs = theano.shared(options['Wemb'], "Wemb")
         self.params.append(Wembs)
 
-        # get embeddings
+        # get word embeddings
         x_emb = Wembs[x.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
 
-
-        Tembs = theano.shared(options["Temb"], "Temb")
-        self.params.append(Tembs)
-
-        t_emb = Tembs[t.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
-
-
         # init LSTM layer for tagger
-        self.lstm_layer = LSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model+"_lstm")
+        self.lstm_layer = LSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model + "_lstm")
 
         # add lstm params
         for param in self.lstm_layer.params:
             self.params.append(param)
 
-        # get output hidden state from LSTM
-        hs_state = self.lstm_layer.layer_output(t_emb, mask)
+        if model == "tagger-lstm":
+            # get tagger embeddings
+            Tembs = theano.shared(options["Temb"], "Temb")
+            self.params.append(Tembs)
+            t_emb = Tembs[t.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
 
-        self.tag_lstm_layer = TagLSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model+"_tag_lstm")
+            # get output hidden state of tagger from LSTM
+            hs_state = self.lstm_layer.layer_output(t_emb, mask)
 
-        for param in self.tag_lstm_layer.params:
-            self.params.append(param)
+            self.tag_lstm_layer = TagLSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model+"_tag_lstm")
 
-        hc_state = self.tag_lstm_layer.layer_output(x_emb, hs_state, mask)
+            for param in self.tag_lstm_layer.params:
+                self.params.append(param)
+
+            hc_state = self.tag_lstm_layer.layer_output(x_emb, hs_state, mask)
+
+        else:
+            # just lstm
+            hc_state = self.lstm_layer.layer_output(x_emb, mask)
+
         hc_state = (hc_state * mask[:, :, None]).sum(axis=0)
         # if xs_mask.sum(axis=0)[:, None] > 0:
         hc_state = hc_state / mask.sum(axis=0)[:, None]
@@ -215,8 +168,8 @@ class TaggerLSTMSentiment(object):
 
         pred = self.logic_regression.p_y_given_x
 
-        f_pred_prob = theano.function([x, t, mask], pred, name='f_pred_prob')
-        self.f_pred = theano.function([x, t, mask], pred.argmax(axis=1), name='f_pred')
+        f_pred_prob = theano.function(x_vars, pred, name='f_pred_prob')
+        self.f_pred = theano.function(x_vars, pred.argmax(axis=1), name='f_pred')
 
         log_likelihood_cost = self.logic_regression.negative_log_likelihood(y)
 
@@ -224,14 +177,14 @@ class TaggerLSTMSentiment(object):
         cost = log_likelihood_cost  # + 0.5 * 0.0001 * l2_sqr
 
         print('Optimization')
-        f_cost = theano.function([x, t, mask, y], cost, name='f_cost')
+        f_cost = theano.function(y_vars, cost, name='f_cost')
 
         grads = tensor.grad(cost, self.params)
-        f_grad = theano.function([x, t, mask, y], grads, name='f_grad')
+        f_grad = theano.function(y_vars, grads, name='f_grad')
 
         lr = tensor.scalar(name='lr')
 
-        self.f_grad_shared, self.f_update = adadelta(lr, self.params, grads, x, t, mask, y, cost)
+        self.f_grad_shared, self.f_update = adadelta(lr, self.params, grads, y_vars, cost)
 
     def pred_error(self, prepare_data, data, iterator, verbose=False):
         """
@@ -245,7 +198,10 @@ class TaggerLSTMSentiment(object):
                                                       numpy.array(data[1])[valid_index],
                                                       [data[2][t] for t in valid_index],
                                                       )
-            preds = self.f_pred(x, t, mask)
+            if self.model == 'tagger-lstm':
+                preds = self.f_pred(x, t, mask)
+            else:
+                preds = self.f_pred(x, mask)
             targets = numpy.array(data[1])[valid_index]
             valid_err += (preds == targets).sum()
 
@@ -300,8 +256,11 @@ class TaggerLSTMSentiment(object):
                     n_samples += x.shape[1]
                     n_timesteps = x.shape[0]
                     n_samples = x.shape[1]
+                    if self.model == 'tagger-lstm':
+                        cost = self.f_grad_shared(x, t, mask, y)
+                    else:
+                        cost = self.f_grad_shared(x, mask, y)
 
-                    cost = self.f_grad_shared(x,t,mask, y)
                     self.f_update(lrate)
 
                     if numpy.isnan(cost) or numpy.isinf(cost):
