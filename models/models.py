@@ -94,7 +94,9 @@ class LSTM:
         self.b.set_value(param_list[2].get_value())
 
     def l2_sqr(self):
-        return tensor.sum(self.w ** 2) + tensor.sum(self.u ** 2)
+        l2_sqr = 0
+        for p in self.params:
+            l2_sqr += tensor.sum(p ** 2)
 
     @staticmethod
     def _slice(_x, n, dim):
@@ -155,7 +157,7 @@ class LSTM:
 class TagLSTM(LSTM):
     def __init__(self, input_dim, hidden_dim, prefix="tag_lstm"):
         LSTM.__init__(self, input_dim, hidden_dim, prefix)
-        self.v = create_ortho_shared(hidden_dim, input_dim, 4, prefix+"_v")
+        self.v = create_ortho_shared(hidden_dim, hidden_dim, 4, prefix+"_v")
     @property
     def params(self):
         return [self.w, self.u, self.v, self.b]
@@ -243,8 +245,6 @@ class SLSTM(object):
 
         # assert
         assert mask is not None
-        assert mask is not None
-
         def _slice(_x, n, dim):
             if _x.ndim == 3:
                 return _x[:, :, n * dim:(n + 1) * dim]
@@ -452,3 +452,4 @@ class DropoutLayer():
                                         dtype=state_before.dtype)),
                          state_before * 0.5)
         self.drop_out = out
+

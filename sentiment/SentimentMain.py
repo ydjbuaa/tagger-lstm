@@ -23,11 +23,19 @@ if __name__ == "__main__":
     # LSTM
     #senti_lstm = SentimentLSTM(options,model='lstm')
 
-    # tagged-lstm
-    senti_lstm = TaggerLSTMSentiment(options, "lstm")
     max_epochs = 10
     batch_size = 25
     lrate = 0.0001
 
-    senti_lstm.train(dataset, max_epochs, batch_size, lrate)
+    results = []
+    test_errs = []
+    for i in range(5):
+        senti_lstm = TaggerLSTMSentiment(options, "lstm")
+        train_err, valid_err, test_err = senti_lstm.train(dataset, max_epochs, batch_size, lrate)
+        results.append([train_err, valid_err, test_err])
+    for r in results:
+        print r
+    print "=" * 20
+    test_errs = numpy.array(results)[:, 2]
+    print "Accuracy:%.3f(%.4f)" % ((1 - test_errs.mean(), test_errs.std()))
 

@@ -1,14 +1,11 @@
-# -*- coding:utf-8 -*-
+# -*- coding:utf -*-
 from models.models import *
 from models.optimizer import *
 from theano import config
 import theano.tensor as tensor
+from scipy import dot, linalg
 import time
 import numpy
-# Set the random number generators' seeds for consistency
-SEED = 123
-numpy.random.seed(SEED)
-
 def get_minibatches_idx(n, minibatch_size, shuffle=False):
     """
     Used to shuffle the dataset at each iteration.
@@ -32,8 +29,7 @@ def get_minibatches_idx(n, minibatch_size, shuffle=False):
 
     return zip(range(len(minibatches)), minibatches)
 
-
-def  prepare_data(seqs, labels, taggers, maxlen=None):
+def  prepare_data(seqsA, seqsB, labels):
     """Create the matrices from the datasets.
 
     This pad each sequence to the same lenght: the lenght of the
@@ -45,49 +41,70 @@ def  prepare_data(seqs, labels, taggers, maxlen=None):
     This swap the axis!
     """
     # x: a list of sentences
-    lengths = [len(s) for s in seqs]
+    lengthsA = [len(s) for s in seqsA]
+    lengthsB = [len(s) for s in seqsB]
 
-    if maxlen is not None:
-        new_seqs = []
-        new_labels = []
-        new_lengths = []
-        new_taggers = []
-        for l, s, y, t in zip(lengths, seqs, labels, taggers):
-            if l < maxlen:
-                new_seqs.append(s)
-                new_labels.append(y)
-                new_lengths.append(l)
-                new_taggers.append(t)
+    n_samples = len(seqsA)
+    maxlen = numpy.max(lengthsA)
 
-        lengths = new_lengths
-        labels = new_labels
-        seqs = new_seqs
-        taggers = new_taggers
+    sentA = numpy.zeros((maxlen, n_samples)).astype('int64')
+    sentA_mask = numpy.zeros((maxlen, n_samples)).astype(theano.config.floatX)
 
-        if len(lengths) < 1:
-            return None, None, None
+    for idx, s in enumerate(seqsA):
+        sentA[:lengthsA[idx], idx] = s
+        sentA_mask[:lengthsA[idx], idx] = 1.
 
-    n_samples = len(seqs)
-    maxlen = numpy.max(lengths)
+    n_samples = len(seqsB)
+    maxlen = numpy.max(lengthsB)
 
-    xc = numpy.zeros((maxlen, n_samples)).astype('int64')
-    xs = numpy.zeros((maxlen, n_samples)).astype('int64')
-    mask = numpy.zeros((maxlen, n_samples)).astype(theano.config.floatX)
+    sentB = numpy.zeros((maxlen, n_samples)).astype('int64')
+    sentB_mask = numpy.zeros((maxlen, n_samples)).astype(theano.config.floatX)
 
-    for idx, s in enumerate(seqs):
-        xc[:lengths[idx], idx] = s
-        xs[:lengths[idx], idx] = taggers[idx]
-        mask[:lengths[idx], idx] = 1.
+    for idx, s in enumerate(seqsB):
+        sentB[:lengthsB[idx], idx] = s
+        sentB_mask[:lengthsB[idx], idx] = 1.
 
     y = numpy.asarray(labels, dtype="int32")
-    return xc, xs, mask, y
+    return sentA, sentB, sentA_mask, sentB_mask, y
+def cul_cosin_distance(x1, x2):
+    return dot(x1, x2.T)/ linalg.norm(x1) / linalg.norm(x2)
 
-class TaggerLSTMSentiment(object):
+class SentenceModel(object):
+    def __init__(self,options, model):
+        self.word_dim = options['word_dim']
+        self.mem_dim = options['mem_dim']
+        self.y_dim = options['y_dim']
+        self.model = model
+
+        print ("Building Model:", model)
+
+        self.lstm_layer = LSTM(self.word_dim, self.mem_dim, prefix='lstm')
+
+
+    @property
+    def params(self):
+        return self.lstm_layer.params
+
+    def layer_output(self, use_noise, emb, mask):
+        hc_state = self.lstm_layer.layer_output(emb, mask)
+        hc_state = (hc_state * mask[:, :, None]).sum(axis=0)
+        # if xs_mask.sum(axis=0)[:, None] > 0:
+        hc_state = hc_state / mask.sum(axis=0)[:, None]
+        hc_state = DropoutLayer(state_before=hc_state, use_noise=use_noise).drop_out
+
+        return hc_state
+
+
+
+class TaggerLSTMPI(object):
+    """
+    tagger-lstm or lstm used for paraphrase identification
+    """
     def __init__(self, options, model):
         """
-        build model
+            build model
 
-        """
+            """
         self.word_dim = options['word_dim']
         self.mem_dim = options['mem_dim']
         self.y_dim = options['y_dim']
@@ -97,109 +114,54 @@ class TaggerLSTMSentiment(object):
         print ("Building Model:", model)
 
         # variables
-        x = tensor.matrix('x', dtype='int64')
+        x_a = tensor.matrix('sentence_a', dtype='int64')
+        a_mask = tensor.matrix('a_mask', dtype=config.floatX)
 
-        mask = tensor.matrix('mask', dtype=config.floatX)
+        x_b = tensor.matrix('sentence_b', dtype='int64')
+        b_mask = tensor.matrix('b_mask', dtype=config.floatX)
+
         y = tensor.vector('y', dtype='int64')
 
-        if model == "lstm":
-            x_vars = [x, mask]
-            y_vars = [x, mask, y]
-        else:
-            t = tensor.matrix("t", dtype='int64')
-            x_vars = [x, t, mask]
-            y_vars = [x, t, mask, y]
 
-        n_timesteps = x.shape[0]
-        n_samples = x.shape[1]
+        x_vars = [x_a, x_b, a_mask, b_mask]
+        y_vars = [x_a, x_b, a_mask, b_mask, y]
+
+
 
         # add word embeddings to params list
         Wembs = theano.shared(options['Wemb'], "Wemb")
         self.params.append(Wembs)
 
-        # get word embeddings
-        x_emb = Wembs[x.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
+        a_emb = Wembs[x_a.flatten()].reshape([x_a.shape[0], x_a.shape[1], self.word_dim])
+        b_emb = Wembs[x_b.flatten()].reshape([x_b.shape[0], x_b.shape[1], self.word_dim])
 
-        l2_sqr = 0
-        if model == "tagger-lstm":
-            # get tagger embeddings
-            # init LSTM layer for tagger
-            self.lstm_layer = LSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model + "_lstm")
-
-            # add lstm params
-            for param in self.lstm_layer.params:
-                self.params.append(param)
-
-            l2_sqr += self.lstm_layer.l2_sqr()
-
-            Tembs = theano.shared(options["Temb"], "Temb")
-            self.params.append(Tembs)
-            t_emb = Tembs[t.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
-
-            # get output hidden state of tagger from LSTM
-            hs_state = self.lstm_layer.layer_output(t_emb, mask)
-
-            self.tag_lstm_layer = TagLSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model+"_tag_lstm")
-
-            for param in self.tag_lstm_layer.params:
-                self.params.append(param)
-
-            l2_sqr += self.lstm_layer.l2_sqr()
-
-            hc_state = self.tag_lstm_layer.layer_output(x_emb, hs_state, mask)
-
-        elif model == 'tagger-slstm':
-            # use SLSTM
-            self.slstm_layer = SLSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model)
-            for param in self.slstm_layer.params:
-                self.params.append(param)
-            Tembs = theano.shared(options["Temb"], "Temb")
-            self.params.append(Tembs)
-            t_emb = Tembs[t.flatten()].reshape([n_timesteps, n_samples, self.word_dim])
-
-            hc_state, hs_state = self.slstm_layer.layer_output(x_emb, t_emb, mask)
-
-        else:
-            # init LSTM layer for tagger
-            self.lstm_layer = LSTM(input_dim=self.word_dim, hidden_dim=self.mem_dim, prefix=model + "_lstm")
-
-            # add lstm params
-            for param in self.lstm_layer.params:
-                self.params.append(param)
-
-            l2_sqr += self.lstm_layer.l2_sqr()
-            # just lstm
-            hc_state = self.lstm_layer.layer_output(x_emb, mask)
-
-        hc_state = (hc_state * mask[:, :, None]).sum(axis=0)
-        # if xs_mask.sum(axis=0)[:, None] > 0:
-        hc_state = hc_state / mask.sum(axis=0)[:, None]
+        self.sentence_model_layer = SentenceModel(options, "SentenceModeling")
+        for param in self.sentence_model_layer.params:
+            self.params.append(param)
 
         # Used for dropout.
         self.use_noise = theano.shared(numpy_floatX(0.))
-        if options['use_dropout']:
-            self.hidden_dropout_layer = DropoutLayer(state_before=hc_state, use_noise=self.use_noise)
-            hc_state = self.hidden_dropout_layer.drop_out
 
-        # init logistic regression layer
-        self.logic_regression = LogisticRegression(input=hc_state,
-                                                   input_size=self.mem_dim,
-                                                   output_size=self.y_dim,
-                                                   prefix="lr")
-        # add logicstic regression params
-        for param in self.logic_regression.params:
-            self.params.append(param)
+        sent_a = self.sentence_model_layer.layer_output(self.use_noise, a_emb, a_mask)
+        sent_b = self.sentence_model_layer.layer_output(self.use_noise, b_emb, b_mask)
 
-        l2_sqr += self.logic_regression.l2_sqr()
 
-        pred = self.logic_regression.p_y_given_x
+        n_samples = x_a.shape[0]
+
+        cos_distance = abs(sent_a - sent_b)
+        #for i in range(n_samples):
+        #   cos_distance[i] = cul_cosin_distance(sent_a[i], sent_b[i])
+
+        self.lr_layer = LogisticRegression(cos_distance, self.mem_dim, self.y_dim, model+"_lr")
+
+        pred = self.lr_layer.p_y_given_x
 
         f_pred_prob = theano.function(x_vars, pred, name='f_pred_prob')
         self.f_pred = theano.function(x_vars, pred.argmax(axis=1), name='f_pred')
 
-        log_likelihood_cost = self.logic_regression.negative_log_likelihood(y)
+        log_likelihood_cost = self.lr_layer.negative_log_likelihood(y)
 
-        cost = log_likelihood_cost  + 0.5 * 0.0001 * l2_sqr
+        cost = log_likelihood_cost  # + 0.5 * 0.0001 * l2_sqr
 
         print('Optimization')
         f_cost = theano.function(y_vars, cost, name='f_cost')
@@ -219,16 +181,11 @@ class TaggerLSTMSentiment(object):
         """
         valid_err = 0
         for _, valid_index in iterator:
-            x, t, mask, y = prepare_data([data[0][t] for t in valid_index],
-                                                      numpy.array(data[1])[valid_index],
-                                                      [data[2][t] for t in valid_index],
-                                                      )
-            if self.model == 'lstm':
-                preds = self.f_pred(x, mask)
-            else:
-                preds = self.f_pred(x, t, mask)
-
-            targets = numpy.array(data[1])[valid_index]
+            sentA, sentB, a_mask, b_mask, y = prepare_data([data[0][t][0] for t in valid_index],
+                                                           [data[0][t][1] for t in valid_index],
+                                                           numpy.array(data[1], dtype="int32")[valid_index])
+            preds = self.f_pred(sentA, sentB, a_mask, b_mask)
+            targets = y
             valid_err += (preds == targets).sum()
 
         valid_err = 1. - numpy_floatX(valid_err) / len(data[0])
@@ -272,21 +229,16 @@ class TaggerLSTMSentiment(object):
 
                     # Select the random examples for this minibatch
                     y = [train[1][t] for t in train_index]
-                    x = [train[0][t] for t in train_index]
-                    s = [train[2][t] for t in train_index]
+                    seqsA = [train[0][t][0] for t in train_index]
+                    seqsB = [train[0][t][1] for t in train_index]
                     # Get the data in numpy.ndarray format
                     # This swap the axis!
                     # Return something of shape (minibatch maxlen, n samples)
-                    x, t, mask, y = prepare_data(x, y, s)
+                    sentA, sentB, a_mask, b_mask, y = prepare_data(seqsA, seqsB, y)
 
-                    n_samples += x.shape[1]
-                    n_timesteps = x.shape[0]
-                    n_samples = x.shape[1]
-                    if self.model == 'lstm':
-                        cost = self.f_grad_shared(x, mask, y)
-                    else:
-                        cost = self.f_grad_shared(x, t, mask, y)
+                    n_samples += sentA.shape[1]
 
+                    cost = self.f_grad_shared(sentA, sentB, a_mask, b_mask, y)
                     self.f_update(lrate)
 
                     if numpy.isnan(cost) or numpy.isinf(cost):
